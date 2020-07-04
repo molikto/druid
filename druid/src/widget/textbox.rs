@@ -28,9 +28,10 @@ use crate::piet::{
 use crate::theme;
 
 use crate::text::{
-    movement, offset_for_delete_backwards, BasicTextInput, EditAction, EditableText, MouseAction,
-    Movement, Selection, TextInput,
+    BasicTextInput, EditAction, EditableText, MouseAction,
+    Selection, TextInput, state_update,
 };
+
 
 const BORDER_WIDTH: f64 = 1.;
 const PADDING_TOP: f64 = 5.;
@@ -96,93 +97,16 @@ impl TextBox {
             .unwrap()
     }
 
-    /// Insert text at the cursor position.
-    /// Replaces selected text if there's a selection.
     fn insert(&mut self, src: &mut String, new: &str) {
-        // EditableText's edit method will panic if selection is greater than
-        // src length, hence we try to constrain it.
-        //
-        // This is especially needed when data was modified externally.
-        // TODO: perhaps this belongs in update?
-        let selection = self.selection.constrain_to(src);
-
-        src.edit(selection.range(), new);
-        self.selection = Selection::caret(selection.min() + new.len());
-    }
-
-    /// Set the selection to be a caret at the given offset, if that's a valid
-    /// codepoint boundary.
-    fn caret_to(&mut self, text: &mut String, to: usize) {
-        match text.cursor(to) {
-            Some(_) => self.selection = Selection::caret(to),
-            None => log::error!("You can't move the cursor there."),
-        }
-    }
-
-    /// Return the active edge of the current selection or cursor.
-    // TODO: is this the right name?
-    fn cursor(&self) -> usize {
-        self.selection.end
+        state_update::insert(&mut self.selection, src, new);
     }
 
     fn do_edit_action(&mut self, edit_action: EditAction, text: &mut String) {
-        match edit_action {
-            EditAction::Insert(chars) | EditAction::Paste(chars) => self.insert(text, &chars),
-            EditAction::Backspace => self.delete_backward(text),
-            EditAction::Delete => self.delete_forward(text),
-            EditAction::JumpDelete(movement) => {
-                self.move_selection(movement, text, true);
-                self.delete_forward(text)
-            }
-            EditAction::JumpBackspace(movement) => {
-                self.move_selection(movement, text, true);
-                self.delete_backward(text)
-            }
-            EditAction::Move(movement) => self.move_selection(movement, text, false),
-            EditAction::ModifySelection(movement) => self.move_selection(movement, text, true),
-            EditAction::SelectAll => self.selection.all(text),
-            EditAction::Click(action) => {
-                if action.mods.shift() {
-                    self.selection.end = action.column;
-                } else {
-                    self.caret_to(text, action.column);
-                }
-            }
-            EditAction::Drag(action) => self.selection.end = action.column,
-        }
+        state_update::do_edit_action(&mut self.selection, edit_action, text);
     }
 
-    /// Edit a selection using a `Movement`.
-    fn move_selection(&mut self, mvmnt: Movement, text: &mut String, modify: bool) {
-        // This movement function should ensure all movements are legit.
-        // If they aren't, that's a problem with the movement function.
-        self.selection = movement(mvmnt, self.selection, text, modify);
-    }
-
-    /// Delete to previous grapheme if in caret mode.
-    /// Otherwise just delete everything inside the selection.
     fn delete_backward(&mut self, text: &mut String) {
-        if self.selection.is_caret() {
-            let cursor = self.cursor();
-            let new_cursor = offset_for_delete_backwards(&self.selection, text);
-            text.edit(new_cursor..cursor, "");
-            self.caret_to(text, new_cursor);
-        } else {
-            text.edit(self.selection.range(), "");
-            self.caret_to(text, self.selection.min());
-        }
-    }
-
-    fn delete_forward(&mut self, text: &mut String) {
-        if self.selection.is_caret() {
-            // Never touch the characters before the cursor.
-            if text.next_grapheme_offset(self.cursor()).is_some() {
-                self.move_selection(Movement::Right, text, false);
-                self.delete_backward(text);
-            }
-        } else {
-            self.delete_backward(text);
-        }
+        state_update::delete_backward(&mut self.selection, text)
     }
 
     /// For a given point, returns the corresponding offset (in bytes) of
@@ -208,7 +132,7 @@ impl TextBox {
 
     /// Calculate a stateful scroll offset
     fn update_hscroll(&mut self, layout: &PietTextLayout) {
-        let cursor_x = self.x_for_offset(layout, self.cursor());
+        let cursor_x = self.x_for_offset(layout, self.selection.end);
         let overall_text_width = layout.width();
 
         let padding = PADDING_LEFT * 2.;
@@ -460,7 +384,7 @@ impl Widget<String> for TextBox {
 
             // Paint the cursor if focused and there's no selection
             if is_focused && self.cursor_on && self.selection.is_caret() {
-                let cursor_x = self.x_for_offset(&text_layout, self.cursor());
+                let cursor_x = self.x_for_offset(&text_layout, self.selection.end);
                 let xy = text_pos + Vec2::new(cursor_x, 2. - font_size);
                 let x2y2 = xy + Vec2::new(0., font_size + 2.);
                 let line = Line::new(xy, x2y2);
